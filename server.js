@@ -21,6 +21,7 @@ const userSchema = new mongoose.Schema({
 	password: { type: String, required: true },
 	wins: { type: Number, default: 0 },
 	losses: { type: Number, default: 0 },
+	draws: { type: Number, default: 0 },
 	game: { type: mongoose.Schema.Types.ObjectId, ref: 'TicTacToeGame' },
   });
 
@@ -31,6 +32,19 @@ const ticTacToeGameSchema = new mongoose.Schema({
 	board: [[String]],
 	currentPlayer: String,
 });
+
+// Method to check if the game is over
+ticTacToeGameSchema.methods.gameOver = function () {
+	const ticTacToeGame = new TicTacToeGame(this);
+	return ticTacToeGame.isGameOver();
+};
+  
+// Method to check if a player has won
+ticTacToeGameSchema.methods.checkWin = function () {
+	const ticTacToeGame = new TicTacToeGame(this);
+	return ticTacToeGame.checkWin();
+};
+
   
 const gameSchema = new mongoose.Schema({
 	players: [String],
@@ -46,12 +60,24 @@ gameSchema.methods.applyMove = function (row, col, player_x, player_o) {
 	const moveResult = ticTacToeGame.makeMove(row, col);
 
 	if (moveResult) {
-		ticTacToeGame.switchPlayer(player_x, player_o);
+		if (!ticTacToeGame.isGameOver()) {
+			ticTacToeGame.switchPlayer(player_x, player_o);
+		}
 		this.gameInstance = ticTacToeGame.getGameState();
 		this.save(); // Save the updated game state to the database
 	}
+	
 
 	return moveResult;
+};
+
+// Method to reset the game
+gameSchema.methods.resetGame = function () {
+	const ticTacToeGame = new TicTacToeGame();
+	this.gameInstance.board = ticTacToeGame.board;
+	this.gameInstance.currentPlayer = this.players[0];
+	this.gameInstance.save(); // Save the updated game state to the database
+	this.active = true;
 };
   
 const Game = mongoose.model('Game', gameSchema);
@@ -100,6 +126,17 @@ app.get('/api/users', async (req, res) => {
 	res.json(users);
 	} catch (error) {
 	res.status(500).json({ error: 'Failed to fetch users.' });
+	}
+});
+// Get user leaderboard with selected fields
+app.get('/api/users/leaderboard', async (req, res) => {
+	try {
+	const users = await User.find({}, { _id: 0, username: 1, wins: 1, losses: 1, draws: 1 })
+		.sort({ wins: 'desc' });
+
+	res.status(200).json(users);
+	} catch (error) {
+	res.status(500).json({ error: 'Failed to fetch users leaderboard. ' + error });
 	}
 });
 
@@ -207,6 +244,11 @@ app.post('/api/make-move/:gameId', verifyToken, async (req, res) => {
 		return res.status(404).json({ error: 'Game not found.' });
 	}
 
+	// Check if the game is active
+	if (!game.active) {
+		return res.status(400).json({ error: 'Game is not active.' });
+	}
+
 	// Check if it's the player's turn
 	if (player !== game.gameInstance.currentPlayer) {
 		return res.status(403).json({ error: 'Not your turn.' });
@@ -220,13 +262,72 @@ app.post('/api/make-move/:gameId', verifyToken, async (req, res) => {
 	}
 
 	// Check if the game is over
-	if (game.gameInstance.gameOver) {
-		//TODO some endgame logic
+	if (game.gameInstance.gameOver()) {
+		const winner = game.gameInstance.checkWin() ? game.gameInstance.currentPlayer : null;
+	
+		// Update player stats
+		if (winner) {
+			// If there's a winner, update wins and losses
+			const loser = game.players.find(player => player !== winner);
+		
+			// if there is a loser (if you play against yourself, there is no loser)
+			if(loser){ 
+				await User.updateOne({ username: winner }, { $inc: { wins: 1 } });
+				await User.updateOne({ username: loser }, { $inc: { losses: 1 } });
+			}
+		} else {
+			// If it's a draw, update draws for both players
+			await User.updateMany(
+				{ username: { $in: game.players } },
+				{ $inc: { draws: 1 } }
+			);
+		}
+	
+		let message;
+		if (winner) {
+			message = `Player ${winner} wins!`;
+		} else {
+			message = 'It\'s a draw!';
+		}
+		// End the game
+		game.active = false;
+		await game.save();
+		
+	
+		return res.status(200).json({ message, winner, updatedGameState: game.gameInstance });
 	}
 
 	res.status(200).json({ message: 'Move successful.', updatedGameState: game.gameInstance });
 	} catch (error) {
 	res.status(500).json({ error: 'Failed to make a move. ' + error });
+	}
+});
+
+// Restart the game
+app.post('/api/restart-game/:gameId', verifyToken, async (req, res) => {
+	try {
+	const { gameId } = req.params;
+
+	// Find the game by ID
+	const game = await Game.findById(gameId);
+
+	if (!game) {
+		return res.status(404).json({ error: 'Game not found.' });
+	}
+
+	// Check if the user making the request is one of the players
+	const requestingUser = req.user.username;
+	if (!game.players.includes(requestingUser)) {
+		return res.status(403).json({ error: 'Permission denied. You are not a player in this game.' });
+	}
+
+	// Restart the game
+	game.resetGame();
+	await game.save();
+
+	res.status(200).json({ message: 'Game restarted successfully.', updatedGameState: game.gameInstance });
+	} catch (error) {
+	res.status(500).json({ error: 'Failed to restart the game. ' + error });
 	}
 });
   
