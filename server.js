@@ -255,7 +255,7 @@ app.post('/api/make-move/:gameId', verifyToken, async (req, res) => {
 	}
 
 	// Apply the move using the TicTacToeGame class
-	const moveResult = game.applyMove(row, col, game.players[0], game.players[1]);
+	const moveResult = await game.applyMove(row, col, game.players[0], game.players[1]);
 
 	if (!moveResult) {
 		return res.status(400).json({ error: 'Invalid move.' });
@@ -291,6 +291,7 @@ app.post('/api/make-move/:gameId', verifyToken, async (req, res) => {
 		}
 		// End the game
 		game.active = false;
+		console.log("came here");
 		await game.save();
 		
 	
